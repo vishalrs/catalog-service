@@ -1,0 +1,73 @@
+flowchart LR
+    C[Internet Client]
+
+    AGW["Azure Application Gateway<br/>L7<br/>TLS termination<br/>Public Certificate"]
+
+    ILB["Azure Internal Load Balancer<br/>L4<br/>10.10.1.7<br/>TCP forwarding"]
+
+    IGW["Istio Gateway<br/>L7<br/>HTTP :80"]
+
+    HR["HTTPRoute<br/>/app1 → App1<br/>/app2 → App2"]
+
+    A1["App1<br/>HTTP"]
+    A2["App2<br/>HTTP"]
+
+    C -->|"HTTPS :443"| AGW
+    AGW -->|"HTTP :80"| ILB
+    ILB -->|"TCP :80"| IGW
+    IGW --> HR
+    HR -->|"/app1"| A1
+    HR -->|"/app2"| A2
+
+
+
+flowchart LR
+    C[Internet Client]
+
+    AGW["Azure Application Gateway<br/>L7<br/>TLS termination #1<br/>Public Certificate"]
+
+    ILB["Azure Internal Load Balancer<br/>L4<br/>10.10.1.7<br/>TCP forwarding only"]
+
+    IGW["Istio Gateway<br/>L7<br/>HTTPS :443<br/>TLS termination #2<br/>Internal Certificate"]
+
+    HR["HTTPRoute<br/>/app1 → App1<br/>/app2 → App2"]
+
+    A1["App1<br/>HTTP"]
+    A2["App2<br/>HTTP"]
+
+    C -->|"HTTPS :443<br/>Public Certificate"| AGW
+
+    AGW -->|"HTTPS :443<br/>Internal Certificate"| ILB
+
+    ILB -->|"TCP :443<br/>TLS passes through"| IGW
+
+    IGW --> HR
+
+    HR -->|"/app1"| A1
+    HR -->|"/app2"| A2
+
+
+flowchart LR
+    C[Internet Client]
+
+    AGW["Azure Application Gateway<br/>L7<br/>TLS termination #1<br/>Public Certificate"]
+
+    ILB["Azure Internal Load Balancer<br/>L4<br/>10.10.1.7<br/>TCP forwarding"]
+
+    IGW["Istio Gateway<br/>L7<br/>HTTPS :443<br/>TLS termination #2"]
+
+    HR["HTTPRoute<br/>/app1 → App1<br/>/app2 → App2"]
+
+    A1["App1<br/>HTTPS / mTLS"]
+    A2["App2<br/>HTTPS / mTLS"]
+
+    C -->|"HTTPS :443"| AGW
+
+    AGW -->|"HTTPS :443"| ILB
+
+    ILB -->|"TCP :443<br/>TLS forwarding"| IGW
+
+    IGW -->|"HTTPS / mTLS"| A1
+    IGW -->|"HTTPS / mTLS"| A2
+
+    IGW --> HR

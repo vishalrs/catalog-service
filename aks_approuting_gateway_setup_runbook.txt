@@ -1,0 +1,308 @@
+AKS Application Routing Gateway API – Gateway, TLS and App1/App2 Setup
+
+Purpose
+
+This runbook captures the steps used to establish the AKS Application
+Routing Gateway API (Istio-based), configure HTTP/HTTPS listeners,
+integrate the Gateway with Azure Key Vault using Workload Identity, and
+expose two test applications through HTTPRoutes.
+
+Commands intentionally omit environment-specific parameter values.
+Replace placeholders such as , , etc. when executing.
+
+STEP 1 — Enable / verify AKS Application Routing with Istio Gateway API
+
+Description: Enable the AKS Application Routing add-on with the managed
+Istio Gateway API implementation, or verify that it is already enabled.
+The important result is the GatewayClass “approuting-istio”.
+
+Command: az aks show –resource-group –name –query
+“addonProfiles.webApplicationRouting.enabled” -o tsv
+
+Command: kubectl get gatewayclass
+
+STEP 2 — Verify the Istio/Application Routing installation
+
+Description: Verify that the AKS-managed Istio control plane is running
+and that the Application Routing GatewayClass is available.
+
+Command: kubectl get pods -n aks-istio-system
+
+Command: kubectl get gatewayclass
+
+STEP 3 — Create the Gateway namespace
+
+Description: Create the dedicated Kubernetes namespace used by the
+Gateway, its certificate ServiceAccount, SecretProviderClass and TLS
+Secret.
+
+Command: kubectl create namespace gateway-system
+
+STEP 4 — Create the Gateway certificate managed identity
+
+Description: Create a User Assigned Managed Identity dedicated to
+Gateway certificate access. This identity will be federated with the
+Kubernetes ServiceAccount used by the Gateway certificate integration.
+
+Command: az identity create –resource-group –name
+
+STEP 5 — Obtain the AKS OIDC issuer
+
+Description: The AKS OIDC issuer is used by Workload Identity
+federation. Obtain the issuer URL from the AKS cluster.
+
+Command: az aks show –resource-group –name –query
+“oidcIssuerProfile.issuerUrl” -o tsv
+
+STEP 6 — Create the Gateway certificate ServiceAccount
+
+Description: Create a ServiceAccount in gateway-system and associate it
+with the Gateway certificate managed identity using the Azure Workload
+Identity client-id annotation.
+
+Command: kubectl apply -f
+
+STEP 7 — Create the Federated Identity Credential
+
+Description: Create a Federated Identity Credential on
+gateway-cert-identity. It connects the AKS OIDC issuer and the
+Kubernetes ServiceAccount subject
+system:serviceaccount:gateway-system:gateway-cert-sa.
+
+Command: az identity federated-credential create –name –identity-name
+–resource-group –issuer –subject –audiences
+
+STEP 8 — Grant Key Vault certificate access
+
+Description: Grant gateway-cert-identity the Azure RBAC role “Key Vault
+Secrets User” at the Key Vault scope. This allows the workload identity
+to retrieve the certificate and private key material required for TLS.
+
+Command: az role assignment create –assignee –role “Key Vault Secrets
+User” –scope
+
+STEP 9 — Create or import the Gateway certificate into Key Vault
+
+Description: Create/import the certificate used by the Gateway HTTPS
+listener. In the previous environment this was done manually from the
+laptop rather than through the Bicep infrastructure pipeline.
+
+Certificate: aks-gateway-internal Subject: CN=aks-gateway.internal
+
+Command: az keyvault certificate import –vault-name –name –file
+
+STEP 10 — Verify the certificate in Key Vault
+
+Description: Verify that the certificate exists and is enabled before
+configuring the Gateway HTTPS listener.
+
+Command: az keyvault certificate show –vault-name –name
+
+STEP 11 — Create the Gateway with HTTP and HTTPS listeners
+
+Description: Create the Gateway named app-gateway using GatewayClass
+approuting-istio. Configure both: - HTTP listener on port 80 - HTTPS
+listener on port 443
+
+The HTTPS listener uses TLS termination and references the Key Vault
+certificate through the Application Routing Gateway API TLS integration.
+The listener also specifies gateway-cert-sa.
+
+Command: kubectl apply -f
+
+STEP 12 — Configure the Gateway to use the Key Vault certificate
+
+Description: The HTTPS listener contains the Application Routing TLS
+integration options: - Key Vault certificate URI - certificate
+ServiceAccount
+
+The certificate URI should be the unversioned Key Vault certificate URI
+so that certificate rotation can be supported.
+
+Command: kubectl apply -f
+
+STEP 13 — Verify the Gateway status
+
+Description: Verify that the Gateway has been accepted and programmed
+and that both listeners are present.
+
+Command: kubectl get gateway -n gateway-system
+
+Command: kubectl describe gateway app-gateway -n gateway-system
+
+STEP 14 — Verify the automatically created SecretProviderClass
+
+Description: Application Routing creates the SecretProviderClass for the
+Gateway certificate integration. Verify that it exists in
+gateway-system.
+
+Expected resource: kv-gw-cert-app-gateway-https
+
+Command: kubectl get secretproviderclass -n gateway-system
+
+STEP 15 — Verify the Kubernetes TLS Secret
+
+Description: The Application Routing certificate integration
+synchronizes the Key Vault certificate into a Kubernetes TLS Secret used
+by the HTTPS Gateway listener.
+
+Expected resource: kv-gw-cert-app-gateway-https Type: kubernetes.io/tls
+
+Command: kubectl get secrets -n gateway-system
+
+Command: kubectl get secret -n gateway-system
+
+STEP 16 — Verify the Gateway Service and Internal Load Balancer
+
+Description: Verify that the Istio/Application Routing Gateway service
+is exposed through an Azure Internal Load Balancer. The service should
+be type LoadBalancer and use the internal-load-balancer annotation.
+
+Command: kubectl get svc -n gateway-system
+
+Command: kubectl describe svc -n gateway-system
+
+STEP 17 — Create the application namespace
+
+Description: Create a namespace for the test applications. Label the
+namespace so that the Gateway is allowed to accept HTTPRoutes from it.
+
+Command: kubectl create namespace demo-apps
+
+Command: kubectl label namespace demo-apps gateway-access=allowed
+
+STEP 18 — Deploy App1
+
+Description: Deploy the first test application and expose it internally
+with a Kubernetes ClusterIP Service named app1-service on port 80.
+
+Resources: - Deployment: app1 - Service: app1-service
+
+Command: kubectl apply -f
+
+STEP 19 — Verify App1
+
+Description: Verify that App1 pods are running and that the Service has
+endpoints.
+
+Command: kubectl get pods -n demo-apps
+
+Command: kubectl get svc -n demo-apps
+
+Command: kubectl get endpoints -n demo-apps
+
+STEP 20 — Deploy App2
+
+Description: Deploy the second test application and expose it internally
+with a Kubernetes ClusterIP Service named app2-service on port 80.
+
+Resources: - Deployment: app2 - Service: app2-service
+
+Command: kubectl apply -f
+
+STEP 21 — Verify App2
+
+Description: Verify that App2 pods are running and that the Service has
+endpoints.
+
+Command: kubectl get pods -n demo-apps
+
+Command: kubectl get svc -n demo-apps
+
+Command: kubectl get endpoints -n demo-apps
+
+STEP 22 — Create the App1 HTTPRoute
+
+Description: Create an HTTPRoute in demo-apps and attach it to
+gateway-system/app-gateway. Match requests with the /app1 path prefix
+and forward them to app1-service on port 80.
+
+The route can rewrite /app1 to / if the test application expects
+requests at the root path.
+
+Command: kubectl apply -f
+
+STEP 23 — Create the App2 HTTPRoute
+
+Description: Create an HTTPRoute in demo-apps and attach it to
+gateway-system/app-gateway. Match requests with the /app2 path prefix
+and forward them to app2-service on port 80.
+
+The route can rewrite /app2 to / if the test application expects
+requests at the root path.
+
+Command: kubectl apply -f
+
+STEP 24 — Verify HTTPRoutes
+
+Description: Verify that both HTTPRoutes are accepted and attached to
+the Gateway.
+
+Command: kubectl get httproute -n demo-apps
+
+Command: kubectl describe httproute app1-route -n demo-apps
+
+Command: kubectl describe httproute app2-route -n demo-apps
+
+STEP 25 — Test HTTP traffic
+
+Description: Test the HTTP listener through the Gateway Internal Load
+Balancer. Verify that /app1 reaches App1 and /app2 reaches App2.
+
+Command: curl -v http:///app1
+
+Command: curl -v http:///app2
+
+STEP 26 — Configure local DNS/hosts entry for the test hostname
+
+Description: For the proof of concept, the hostname aks-gateway.internal
+was mapped to the Gateway Internal Load Balancer IP using /etc/hosts. In
+a production environment, use the appropriate internal DNS solution
+instead.
+
+Command: sudo sh -c ‘echo “ ” >> /etc/hosts’
+
+STEP 27 — Test HTTPS traffic
+
+Description: Test the HTTPS listener using the hostname contained in the
+certificate. For a self-signed certificate, use the CA certificate with
+curl rather than disabling certificate validation.
+
+Command: curl -vk https:///app1
+
+Command: curl –cacert https:///app1
+
+Command: curl –cacert https:///app2
+
+FINAL RESOURCE INVENTORY
+
+Azure: 1. AKS Application Routing add-on 2. AKS managed Istio Gateway
+API implementation 3. User Assigned Managed Identity:
+gateway-cert-identity 4. Federated Identity Credential 5. Key Vault 6.
+Key Vault certificate: aks-gateway-internal 7. Key Vault RBAC
+assignment: Key Vault Secrets User 8. Azure Internal Load Balancer
+(created by the Kubernetes LoadBalancer Service)
+
+Kubernetes: 1. Namespace: gateway-system 2. GatewayClass:
+approuting-istio 3. ServiceAccount: gateway-cert-sa 4. Gateway:
+app-gateway 5. SecretProviderClass: kv-gw-cert-app-gateway-https 6. TLS
+Secret: kv-gw-cert-app-gateway-https 7. Namespace: demo-apps 8.
+Namespace label: gateway-access=allowed 9. Deployment: app1 10. Service:
+app1-service 11. Deployment: app2 12. Service: app2-service 13.
+HTTPRoute: app1-route 14. HTTPRoute: app2-route
+
+FINAL TRAFFIC FLOW
+
+HTTP: Client -> Internal Load Balancer -> Istio Gateway HTTP listener
+:80 -> HTTPRoute /app1 or /app2 -> Kubernetes Service -> Application Pod
+
+HTTPS: Client -> Internal Load Balancer -> Istio Gateway HTTPS listener
+:443 -> TLS termination using Key Vault certificate -> HTTPRoute /app1
+or /app2 -> Kubernetes Service -> Application Pod
+
+CERTIFICATE / IDENTITY FLOW
+
+AKS OIDC issuer -> Federated Identity Credential ->
+gateway-cert-identity -> Key Vault Secrets User -> Azure Key Vault
+certificate -> Application Routing SecretProviderClass -> Kubernetes TLS
+Secret -> Istio Gateway HTTPS listener :443

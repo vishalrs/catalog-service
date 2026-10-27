@@ -1,0 +1,75 @@
+A useful way to think about it is as one pipeline run for the commit that was just pushed to the **designated feature branch**. It builds only the API changed by that commit, publishes an image to Nexus, then deploys that image and its HTTPRoute to AKS.
+
+```mermaid
+flowchart LR
+    Commit["Commit to deployment branch"] --> Identify["Identify API folder<br/>validate one API"]
+    Identify --> CI["CI: Maven build and tests"]
+    CI --> Jar["Publish server JAR artifact"]
+    Jar --> Docker["Docker: build image"]
+    Docker --> Nexus[("Nexus image registry")]
+    Nexus --> CD["CD: deploy image to AKS"]
+    CD --> Route["Apply/update HTTPRoute"]
+    Route --> Verify["Wait for rollout and verify"]
+```
+
+## 1. Trigger and identify the API
+
+Configure the pipeline to trigger only for the designated branch and paths under `apis/**`. For example, a commit changing `apis/order-api/` should result in `apiName=order-api`.
+
+The pipeline should validate that the change:
+
+- Touches exactly one API folder.
+- Does not modify platform-owned files such as pipeline templates or shared Kubernetes manifests.
+- Is the expected commit or push shape.
+
+One nuance: your rule is **one API per commit**, but a single Git push could contain multiple commits. Either have the UI create and push exactly one commit per request, or make the pipeline explicitly handle/reject pushes containing multiple API changes. A simple `HEAD~1..HEAD` diff is only safe if each push produces a single commit.
+
+## 2. CI: build and test
+
+For the identified API, the pipeline checks out the triggering commit and runs the Maven reactor from that API’s parent POM. Conceptually:
+
+```text
+mvn -B -ntp -f apis/<api-name>/pom.xml clean verify
+```
+
+That should build both the `*-core` and `*-server` modules, run tests, and produce the runnable server JAR.
+
+The stage should:
+
+- Configure access to Maven dependencies through Nexus.
+- Publish JUnit test results, including when tests fail.
+- Fail the run on compilation or test failure.
+- Publish the **server JAR** as a pipeline artifact for the Docker stage.
+
+A correction to my earlier example: Azure DevOps’ `MavenAuthenticate` task is for Azure Artifacts feeds, not generic Nexus authentication. For Nexus Maven access, configure Maven settings using a secure pipeline variable or another approved secret mechanism; don’t commit Nexus credentials in `settings.xml`.
+
+## 3. Docker: build and push to Nexus
+
+The image stage downloads the JAR artifact and builds the API’s own Dockerfile. The Docker build context should be that API’s folder, so the Dockerfile and application files are scoped to that project.
+
+The image should use a unique immutable tag, such as the build ID or commit SHA—not `latest`. Record the full image reference, for example:
+
+```text
+<nexus-host>/<repository>/<api-name>:<commit-sha>
+```
+
+Then authenticate to Nexus using an Azure DevOps Docker Registry service connection and push the image. If the Dockerfile expects the JAR at `apis/<api-name>/<api-name>-server/target/`, the stage needs to place the downloaded artifact there before building.
+
+**Security consideration:** the Dockerfile and Maven build scripts are executable project content. Avoid giving those steps AKS credentials. Limit Nexus publishing credentials and pipeline permissions, and keep the pipeline definition and deployment templates under platform-team control.
+
+## 4. CD: deploy to AKS
+
+Only run CD after the image push succeeds. The deployment stage should:
+
+1. Authenticate to Azure and get AKS credentials.
+2. Select the AKS namespace associated with the API.
+3. Render the API’s deployment configuration with the exact image tag.
+4. Apply or update the Kubernetes Deployment and Service.
+5. Apply or update its Gateway API `HTTPRoute`.
+6. Wait for the Deployment rollout and report success or failure.
+
+For your setup, the HTTPRoute belongs in the API namespace and references the shared Gateway in `gateway-system`. The namespace needs the `gateway-access: "allowed"` label so the Gateway’s route policy accepts it.
+
+Avoid granting the pipeline cluster-admin just so it can create namespaces. Prefer having the platform team create and label namespaces ahead of time, then give the deploy identity permissions scoped to the API namespace. The same applies to Nexus pull credentials: provision them through a controlled mechanism rather than exposing the password broadly to the pipeline.
+
+Finally, because multiple developers share one deployment branch, configure deployments so concurrent pipeline runs cannot race and leave an older image deployed after a newer one. Use an Azure DevOps environment lock and choose whether runs should deploy sequentially or whether only the latest queued run should deploy.

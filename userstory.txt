@@ -1,3 +1,42 @@
+User story: Build and deploy generated APIs to AKS
+As a developer using the API generation platform,
+I want each commit to the designated deployment branch to build the changed API, publish its Docker image to Nexus, and deploy it to AKS,
+so that a generated API can be made available through the shared Istio gateway without manual build or deployment steps.
+
+Acceptance criteria
+Pipeline trigger and scope
+
+A commit to the designated feature branch that changes files under apis/<api-name>/ triggers the Azure DevOps pipeline.
+The pipeline identifies the API from the changed paths and fails if a commit changes more than one API or changes files outside the permitted API scope.
+Commits to other branches do not deploy to AKS.
+CI build
+
+The pipeline builds the API’s multi-module Maven project, including its core and server modules.
+Unit tests run as part of the build.
+A failed build or test prevents the image and deployment stages from running.
+The runnable server JAR is retained as a pipeline artifact for the image stage.
+Docker image
+
+The pipeline builds the image using that API’s Dockerfile and the API folder as the build context.
+The image is tagged with a unique, traceable identifier, such as the build ID or commit SHA.
+The pipeline authenticates securely and pushes the image to the configured Nexus Docker repository.
+A failed image build or push prevents deployment.
+CD to AKS
+
+The pipeline deploys the image to the API’s own Kubernetes namespace.
+It applies or updates the API’s Deployment and Service, and creates or updates an HTTPRoute attached to the shared Istio Gateway.
+The namespace is labelled to allow routes from that namespace to attach to the Gateway.
+The route directs the configured API path to the API’s Service.
+The pipeline waits for the Deployment rollout to complete and fails if it does not become ready.
+Security and traceability
+
+Nexus and AKS credentials are supplied through secured Azure DevOps service connections or secret variables—not committed to the repository.
+The pipeline uses least-privilege permissions for image publishing and AKS deployment.
+The pipeline output records the API name, source commit, image reference, and deployment result.
+Assumption: The pipeline deploys from one designated feature branch, and each commit contains changes for exactly one API.
+
+
+
 A useful way to think about it is as one pipeline run for the commit that was just pushed to the **designated feature branch**. It builds only the API changed by that commit, publishes an image to Nexus, then deploys that image and its HTTPRoute to AKS.
 
 ```mermaid
